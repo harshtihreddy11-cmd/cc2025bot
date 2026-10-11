@@ -32,13 +32,38 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
-      - name: Write config files from secrets
+      - name: Write and validate config files
         env:
           PORTAL_CONFIG_JSON: ${{ secrets.PORTAL_CONFIG_JSON }}
           BOT_CONFIG_JSON: ${{ secrets.BOT_CONFIG_JSON }}
         run: |
+          set -eu
+          test -n "$PORTAL_CONFIG_JSON" || { echo "::error::Add the PORTAL_CONFIG_JSON repository secret."; exit 1; }
+          test -n "$BOT_CONFIG_JSON" || { echo "::error::Add the BOT_CONFIG_JSON repository secret."; exit 1; }
           printf '%s' "$PORTAL_CONFIG_JSON" > config.json
           printf '%s' "$BOT_CONFIG_JSON" > bot_config.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for name in ("config.json", "bot_config.json"):
+              with Path(name).open() as config_file:
+                  data = json.load(config_file)
+              if not isinstance(data, dict):
+                  raise SystemExit(f"{name} must contain a JSON object")
+
+          with Path("bot_config.json").open() as config_file:
+              bot_config = json.load(config_file)
+          if not isinstance(bot_config.get("bot_token"), str) or not bot_config["bot_token"].strip():
+              raise SystemExit("bot_config.json must contain a non-empty bot_token")
+          PY
 
       - name: Run bot (stops gracefully after 5h50m)
-        run: timeout --signal=INT 350m python bot.py || true
+        run: |
+          set +e
+          timeout --signal=INT --kill-after=30s 350m python bot.py
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            exit "$status"
+          fi
