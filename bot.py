@@ -483,7 +483,8 @@ def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
         if time_split_minutes and time_split_minutes > 0:
             try:
                 parts = downloader.split_by_duration(
-                    ff, out_path, out_dir, time_split_minutes * 60)
+                    ff, out_path, out_dir, time_split_minutes * 60,
+                    log=log_)
                 if len(parts) > 1:
                     log_("  ✂️ time-split → {} parts".format(len(parts)))
                     try:
@@ -501,10 +502,20 @@ def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
         final_parts = []
         for c in candidates:
             try:
-                sp = downloader.split_by_size_limit(ff, c, out_dir, max_bytes)
+                sp = downloader.split_by_size_limit(
+                    ff, c, out_dir, max_bytes, log=log_)
             except Exception as e:
-                log_("  ⚠️ size-split skipped for {}: {}".format(c.name, e))
-                sp = [c]
+                raise RuntimeError(
+                    "size-split failed for {}: {}".format(c.name, e)
+                ) from e
+            oversized = [part for part in sp
+                         if part.stat().st_size > max_bytes]
+            if oversized:
+                raise RuntimeError(
+                    "size-split returned oversized part(s): {}".format(
+                        ", ".join("{} ({:.1f} MiB)".format(
+                            part.name, part.stat().st_size / (1024 * 1024))
+                            for part in oversized)))
             if len(sp) > 1:
                 log_("  ✂️ size-split {} → {} parts".format(c.name, len(sp)))
                 try:
@@ -514,6 +525,9 @@ def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
             final_parts.extend(sp)
 
         final_parts = downloader.number_parts(final_parts, out_path)
+        for part in final_parts:
+            log_("  📄 {} ({:.1f} MiB)".format(
+                part.name, part.stat().st_size / (1024 * 1024)))
         produced.extend(final_parts)
 
         try:
@@ -1226,7 +1240,7 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                     try:
                         smaller_parts = await asyncio.to_thread(
                             downloader.split_by_size_limit,
-                            ffmpeg, p, out_dir, retry_limit)
+                            ffmpeg, p, out_dir, retry_limit, log=log.info)
                     except Exception as split_error:
                         log.exception("could not re-split rejected upload %s", p)
                         log.error("re-split failure: %s", split_error)

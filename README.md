@@ -40,8 +40,14 @@ The optional 90-minute split is applied before the upload-size split. If
 FFmpeg cannot produce multiple time-based parts for a file longer than the
 requested interval, the job reports a failure instead of uploading the
 unsplit file. Split MP4 and M4A files are numbered `_part_001`, `_part_002`,
-and so on. Audio-only downloads require the archive to contain an audio
-stream; video-only streams are reported as unavailable for audio conversion.
+and so on. MP4 splits are balanced and adjacent pieces are recombined when
+they still fit the limit, avoiding unnecessary tiny extra uploads. If sparse
+video keyframes prevent a compliant size split or exceed the requested time
+split, that MP4 is re-encoded at CRF 20 with forced split keyframes; the bot
+reports when this quality-changing fallback is used. M4A files remain
+stream-copied and adjacent audio pieces are combined where possible.
+Audio-only downloads require the archive to contain an audio stream;
+video-only streams are reported as unavailable for audio conversion.
 
 From a channel's EPG, choose **Select multiple programmes** to toggle
 programmes across pages, then confirm the selection. Alternatively choose

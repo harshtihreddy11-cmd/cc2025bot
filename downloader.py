@@ -425,7 +425,25 @@ def extract_video_thumbnail(ffmpeg, src_path, thumbnail_path, timestamp):
             src_path))
 
 
-def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
+def _concat_media_parts(ffmpeg, parts, destination):
+    with tempfile.TemporaryDirectory(
+            prefix=".concat_", dir=destination.parent) as tmp:
+        concat_list = Path(tmp) / "parts.txt"
+        concat_list.write_text("".join(
+            "file '{}'\n".format(
+                str(part).replace("\\", "\\\\").replace("'", "\\'"))
+            for part in parts
+        ), encoding="utf-8")
+        _run_ffmpeg([
+            ffmpeg, "-y", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-map", "0", "-c", "copy",
+            "-movflags", "+faststart", str(destination),
+        ])
+
+
+def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95,
+                        _reencode_initial=False, log=print):
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     if not 0 < headroom < 1:
@@ -440,6 +458,38 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
 
     with tempfile.TemporaryDirectory(prefix=".size_split_", dir=out_dir) as tmp:
         tmp_dir = Path(tmp)
+        if _reencode_initial:
+            log("  ⚠️ balancing MP4 chunks with re-encoding: {}".format(
+                src_path.name))
+            duration = probe_duration_seconds(ffmpeg, src_path)
+            if duration <= 0:
+                raise RuntimeError("invalid duration for split")
+            target_bytes = min(max_bytes * headroom, src_path.stat().st_size / 2)
+            segment_seconds = max(
+                1, int(duration * target_bytes / src_path.stat().st_size))
+            pattern = tmp_dir / "balanced_part_%03d.mp4"
+            _run_ffmpeg([
+                ffmpeg, "-y", "-loglevel", "error",
+                "-i", str(src_path),
+                "-map", "0:v:0?", "-map", "0:a:0?", "-sn",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*{})".format(segment_seconds),
+                "-c:a", "aac", "-b:a", "192k",
+                "-f", "segment",
+                "-segment_time", str(segment_seconds),
+                "-reset_timestamps", "1",
+                "-avoid_negative_ts", "make_zero",
+                "-segment_format_options", "movflags=+faststart",
+                str(pattern),
+            ])
+            initial_parts = sorted(tmp_dir.glob("balanced_part_*.mp4"))
+            if len(initial_parts) < 2:
+                raise RuntimeError(
+                    "re-encoded size split produced fewer than two parts")
+            queue = [(part, 0, True)
+                     for part in reversed(initial_parts)]
+
         while queue:
             current, depth, is_temporary = queue.pop()
             size = current.stat().st_size
@@ -454,27 +504,68 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
             duration = probe_duration_seconds(ffmpeg, current)
             if duration <= 0:
                 raise RuntimeError("invalid duration for split")
+            target_bytes = min(max_bytes * headroom, size / 2)
             segment_seconds = max(
-                1, int(duration * max_bytes * headroom / size))
+                1, int(duration * target_bytes / size))
 
             pattern = tmp_dir / "split_{:04d}_part_%03d{}".format(
                 split_count, current.suffix)
-            _run_ffmpeg([
-                ffmpeg, "-y", "-loglevel", "error",
-                "-i", str(current),
-                "-c", "copy",
-                "-map", "0",
-                "-f", "segment",
-                "-segment_time", str(segment_seconds),
-                "-reset_timestamps", "1",
-                "-avoid_negative_ts", "make_zero",
-                "-segment_format_options", "movflags=+faststart",
-                str(pattern),
-            ])
-            parts = sorted(tmp_dir.glob(
-                "split_{:04d}_part_*{}".format(split_count, current.suffix)))
+
+            def make_parts(reencode_video=False):
+                cmd = [ffmpeg, "-y", "-loglevel", "error",
+                       "-i", str(current)]
+                if reencode_video:
+                    cmd.extend([
+                        "-map", "0:v:0?", "-map", "0:a:0?", "-sn",
+                        "-c:v", "libx264", "-preset", "veryfast",
+                        "-crf", "20",
+                        "-force_key_frames",
+                        "expr:gte(t,n_forced*{})".format(segment_seconds),
+                        "-c:a", "aac", "-b:a", "192k",
+                    ])
+                else:
+                    cmd.extend(["-c", "copy", "-map", "0"])
+                cmd.extend([
+                    "-f", "segment",
+                    "-segment_time", str(segment_seconds),
+                    "-reset_timestamps", "1",
+                    "-avoid_negative_ts", "make_zero",
+                    "-segment_format_options", "movflags=+faststart",
+                    str(pattern),
+                ])
+                _run_ffmpeg(cmd)
+                return sorted(tmp_dir.glob(
+                    "split_{:04d}_part_*{}".format(
+                        split_count, current.suffix)))
+
+            copy_error = None
+            try:
+                parts = make_parts()
+            except RuntimeError as error:
+                if current.suffix.lower() != ".mp4":
+                    raise
+                copy_error = error
+                parts = []
+
+            split_failed = len(parts) < 2 or any(
+                part.stat().st_size >= size for part in parts)
+            if split_failed and current.suffix.lower() == ".mp4":
+                log("  ⚠️ keyframe-aligned size split failed; re-encoding "
+                    "{}".format(current.name))
+                for part in parts:
+                    part.unlink()
+                for part in tmp_dir.glob(
+                        "split_{:04d}_part_*{}".format(
+                            split_count, current.suffix)):
+                    part.unlink()
+                parts = make_parts(reencode_video=True)
+
             split_count += 1
             if len(parts) < 2 or any(p.stat().st_size >= size for p in parts):
+                if copy_error and not parts:
+                    raise RuntimeError(
+                        "stream-copy and re-encoded size splitting failed "
+                        "for {}".format(current.name)) from copy_error
                 raise RuntimeError(
                     "ffmpeg could not reduce oversized file {}".format(
                         current.name))
@@ -483,8 +574,27 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
                 current.unlink()
             queue.extend((part, depth + 1, True) for part in reversed(parts))
 
+        coalesced = []
+        merge_count = 0
+        for part in ready:
+            if coalesced \
+                    and coalesced[-1].stat().st_size + part.stat().st_size \
+                    <= max_bytes:
+                previous = coalesced[-1]
+                merged = tmp_dir / "merged_{:04d}{}".format(
+                    merge_count, src_path.suffix)
+                merge_count += 1
+                _concat_media_parts(ffmpeg, [previous, part], merged)
+                if merged.stat().st_size <= max_bytes:
+                    previous.unlink()
+                    part.unlink()
+                    coalesced[-1] = merged
+                    continue
+                merged.unlink()
+            coalesced.append(part)
+
         result = []
-        for index, part in enumerate(ready, 1):
+        for index, part in enumerate(coalesced, 1):
             if not part.is_relative_to(tmp_dir):
                 result.append(part)
                 continue
@@ -492,10 +602,20 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
                 src_path.stem, index, src_path.suffix))
             part.replace(destination)
             result.append(destination)
-        return result
+
+    minimum_parts = (src_path.stat().st_size + max_bytes - 1) // max_bytes
+    if not _reencode_initial and src_path.suffix.lower() == ".mp4" \
+            and len(result) > minimum_parts:
+        for part in result:
+            part.unlink()
+        return split_by_size_limit(
+            ffmpeg, src_path, out_dir, max_bytes, headroom,
+            _reencode_initial=True, log=log,
+        )
+    return result
 
 
-def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):
+def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds, log=print):
     if segment_seconds <= 0:
         return [src_path]
     if probe_duration_seconds(ffmpeg, src_path) <= segment_seconds:
@@ -503,28 +623,114 @@ def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):
 
     ext = src_path.suffix
     stem = src_path.stem
-    pattern = str(out_dir / "{}_tpart_%03d{}".format(stem, ext))
-    _run_ffmpeg([
-        ffmpeg, "-y",
-        "-loglevel", "error",
-        "-i", str(src_path),
-        "-c", "copy",
-        "-map", "0",
-        "-f", "segment",
-        "-segment_time", str(int(segment_seconds)),
-        "-reset_timestamps", "1",
-        "-avoid_negative_ts", "make_zero",
-        "-segment_format_options", "movflags=+faststart",
-        pattern,
-    ])
-    parts = sorted(out_dir.glob("{}_tpart_*{}".format(stem, ext)))
-    if not parts:
-        raise RuntimeError("time-split produced no parts")
-    if len(parts) < 2:
-        raise RuntimeError(
-            "time-split did not split {} despite its duration exceeding "
-            "{} seconds".format(src_path.name, int(segment_seconds)))
-    return parts
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tolerance = max(5, min(30, int(segment_seconds * 0.01)))
+
+    with tempfile.TemporaryDirectory(prefix=".time_split_", dir=out_dir) as tmp:
+        tmp_dir = Path(tmp)
+
+        def make_parts(reencode_video=False):
+            pattern = tmp_dir / "time_part_%03d{}".format(ext)
+            cmd = [ffmpeg, "-y", "-loglevel", "error", "-i", str(src_path)]
+            if reencode_video:
+                cmd.extend([
+                    "-map", "0:v:0?", "-map", "0:a:0?", "-sn",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-force_key_frames",
+                    "expr:gte(t,n_forced*{})".format(int(segment_seconds)),
+                    "-c:a", "aac", "-b:a", "192k",
+                ])
+            else:
+                cmd.extend(["-c", "copy", "-map", "0"])
+            cmd.extend([
+                "-f", "segment",
+                "-segment_time", str(int(segment_seconds)),
+                "-reset_timestamps", "1",
+                "-avoid_negative_ts", "make_zero",
+                "-segment_format_options", "movflags=+faststart",
+                str(pattern),
+            ])
+            _run_ffmpeg(cmd)
+            return sorted(tmp_dir.glob("time_part_*{}".format(ext)))
+
+        copy_error = None
+        try:
+            parts = make_parts()
+        except RuntimeError as error:
+            if ext.lower() != ".mp4":
+                raise
+            copy_error = error
+            parts = []
+
+        if ext.lower() == ".mp4" and len(parts) < 2:
+            log("  ⚠️ video time-split failed in stream-copy mode; "
+                "re-encoding {}".format(src_path.name))
+            for part in tmp_dir.glob("time_part_*{}".format(ext)):
+                part.unlink()
+            parts = make_parts(reencode_video=True)
+        if not parts:
+            raise RuntimeError("time-split produced no parts")
+        if len(parts) < 2:
+            error = RuntimeError(
+                "time-split did not split {} despite its duration exceeding "
+                "{} seconds".format(src_path.name, int(segment_seconds)))
+            if copy_error:
+                raise error from copy_error
+            raise error
+
+        durations = [probe_duration_seconds(ffmpeg, part) for part in parts]
+        if ext.lower() == ".mp4" and any(
+                duration > segment_seconds + tolerance
+                for duration in durations):
+            log("  ⚠️ video time-split exceeded its duration; re-encoding "
+                "{}".format(src_path.name))
+            for part in parts:
+                part.unlink()
+            for part in tmp_dir.glob("time_part_*{}".format(ext)):
+                part.unlink()
+            parts = make_parts(reencode_video=True)
+            if len(parts) < 2:
+                raise RuntimeError(
+                    "accurate time-split produced fewer than two parts for "
+                    "{}".format(src_path.name))
+            durations = [probe_duration_seconds(ffmpeg, part) for part in parts]
+
+        if any(duration > segment_seconds + tolerance for duration in durations):
+            raise RuntimeError(
+                "time-split produced a part longer than the requested "
+                "{} seconds for {}".format(
+                    int(segment_seconds), src_path.name))
+
+        coalesced_parts = []
+        coalesced_durations = []
+        merge_count = 0
+        for part, duration in zip(parts, durations):
+            if coalesced_parts \
+                    and coalesced_durations[-1] + duration \
+                    <= segment_seconds + tolerance:
+                previous = coalesced_parts[-1]
+                merged = tmp_dir / "time_merged_{:03d}{}".format(
+                    merge_count, ext)
+                merge_count += 1
+                _concat_media_parts(ffmpeg, [previous, part], merged)
+                merged_duration = probe_duration_seconds(ffmpeg, merged)
+                if merged_duration <= segment_seconds + tolerance:
+                    previous.unlink()
+                    part.unlink()
+                    coalesced_parts[-1] = merged
+                    coalesced_durations[-1] = merged_duration
+                    continue
+                merged.unlink()
+            coalesced_parts.append(part)
+            coalesced_durations.append(duration)
+
+        result = []
+        for index, part in enumerate(coalesced_parts, 1):
+            destination = unique_path(out_dir / "{}_tpart_{:03d}{}".format(
+                stem, index - 1, ext))
+            part.replace(destination)
+            result.append(destination)
+        return result
 
 
 def ensure_ffmpeg():
