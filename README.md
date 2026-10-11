@@ -14,3 +14,10 @@ The runner uses Ubuntu 24.04 explicitly, so it is not affected by the announced
 `ubuntu-latest` migration to Ubuntu 26. A workflow cannot start if GitHub
 blocks Actions because of a billing or spending-limit issue; the repository
 owner must resolve that under **Billing & plans** before rerunning it.
+
+Uploads are split to stay below 45,000,000 bytes, with additional size checks
+and automatic re-splitting if Telegram still rejects a part as too large.
+`telegram_max_mb` in `BOT_CONFIG_JSON` can set a lower limit, but a higher
+value does not increase the hosted Bot API upload cap. Audio-only downloads
+require the archive to contain an audio stream; video-only streams are
+reported as unavailable for audio conversion.

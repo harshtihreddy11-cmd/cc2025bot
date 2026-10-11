@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 STB_UA = ("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 "
           "(KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3")
@@ -347,37 +348,90 @@ def probe_duration_seconds(ffmpeg, src_path):
     return h * 3600 + mi * 60 + s
 
 
+def has_audio_stream(src_path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("ffprobe not found on PATH")
+    result = subprocess.run([
+        ffprobe, "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=index",
+        "-of", "csv=p=0",
+        str(src_path),
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError("ffprobe failed: {}".format(error))
+    return bool(result.stdout.strip())
+
+
 def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
-    size = src_path.stat().st_size
-    if size <= max_bytes:
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    if not 0 < headroom < 1:
+        raise ValueError("headroom must be between 0 and 1")
+    if src_path.stat().st_size <= max_bytes:
         return [src_path]
 
-    duration = probe_duration_seconds(ffmpeg, src_path)
-    if duration <= 0:
-        raise RuntimeError("invalid duration for split")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    queue = [(src_path, 0, False)]
+    ready = []
+    split_count = 0
 
-    bps = size / duration
-    target_bytes = max_bytes * headroom
-    segment_seconds = max(60, int(target_bytes / bps))
+    with tempfile.TemporaryDirectory(prefix=".size_split_", dir=out_dir) as tmp:
+        tmp_dir = Path(tmp)
+        while queue:
+            current, depth, is_temporary = queue.pop()
+            size = current.stat().st_size
+            if size <= max_bytes:
+                ready.append(current)
+                continue
+            if depth >= 12:
+                raise RuntimeError(
+                    "could not split {} below {} bytes".format(
+                        current.name, max_bytes))
 
-    ext = src_path.suffix
-    stem = src_path.stem
-    pattern = str(out_dir / "{}_part_%03d{}".format(stem, ext))
-    _run_ffmpeg([
-        ffmpeg, "-y",
-        "-i", str(src_path),
-        "-c", "copy",
-        "-map", "0",
-        "-f", "segment",
-        "-segment_time", str(segment_seconds),
-        "-reset_timestamps", "1",
-        "-avoid_negative_ts", "make_zero",
-        pattern,
-    ])
-    parts = sorted(out_dir.glob("{}_part_*{}".format(stem, ext)))
-    if not parts:
-        raise RuntimeError("split produced no parts")
-    return parts
+            duration = probe_duration_seconds(ffmpeg, current)
+            if duration <= 0:
+                raise RuntimeError("invalid duration for split")
+            segment_seconds = max(
+                1, int(duration * max_bytes * headroom / size))
+
+            pattern = tmp_dir / "split_{:04d}_part_%03d{}".format(
+                split_count, current.suffix)
+            _run_ffmpeg([
+                ffmpeg, "-y", "-loglevel", "error",
+                "-i", str(current),
+                "-c", "copy",
+                "-map", "0",
+                "-f", "segment",
+                "-segment_time", str(segment_seconds),
+                "-reset_timestamps", "1",
+                "-avoid_negative_ts", "make_zero",
+                str(pattern),
+            ])
+            parts = sorted(tmp_dir.glob(
+                "split_{:04d}_part_*{}".format(split_count, current.suffix)))
+            split_count += 1
+            if len(parts) < 2 or any(p.stat().st_size >= size for p in parts):
+                raise RuntimeError(
+                    "ffmpeg could not reduce oversized file {}".format(
+                        current.name))
+
+            if is_temporary:
+                current.unlink()
+            queue.extend((part, depth + 1, True) for part in reversed(parts))
+
+        result = []
+        for index, part in enumerate(ready, 1):
+            if not part.is_relative_to(tmp_dir):
+                result.append(part)
+                continue
+            destination = unique_path(out_dir / "{}_sizepart_{:03d}{}".format(
+                src_path.stem, index, src_path.suffix))
+            part.replace(destination)
+            result.append(destination)
+        return result
 
 
 def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):

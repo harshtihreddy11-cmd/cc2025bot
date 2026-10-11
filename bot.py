@@ -31,12 +31,19 @@ CONFIG_PATH = BASE / "config.json"
 BOT_CONFIG_PATH = BASE / "bot_config.json"
 CHANNELS_CACHE = BASE / "channels.json"
 OUT_ROOT = BASE / "downloads"
+TELEGRAM_MAX_UPLOAD_BYTES = 45_000_000
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("cc2025-bot")
+
+
+def is_upload_size_error(error):
+    message = str(error).lower()
+    return "413" in message or "request entity too large" in message
 
 
 def load_cfg():
@@ -370,15 +377,13 @@ def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
 
         try:
             if want_audio:
-                try:
-                    if init_paths:
-                        raise RuntimeError("fMP4: using merge path")
-                    downloader.extract_audio_from_segments(ff, paths, out_path)
-                except Exception as pipe_error:
-                    log_("  ⚠️ direct audio copy unavailable; fallback: {}".format(pipe_error))
-                    downloader.concat_ts(init_paths + paths, merged_ts)
-                    merged_for_remux = merged_ts
-                    downloader.extract_audio_to_m4a(ff, merged_ts, out_path)
+                downloader.concat_ts(init_paths + paths, merged_ts)
+                if not downloader.has_audio_stream(merged_ts):
+                    raise RuntimeError(
+                        "archive contains no audio stream; cannot create "
+                        "an audio-only file")
+                merged_for_remux = merged_ts
+                downloader.extract_audio_to_m4a(ff, merged_ts, out_path)
             else:
                 if init_paths:
                     merged_mp4 = blk_dir / "_merged.mp4"
@@ -828,7 +833,9 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-    max_bytes = int(bot_cfg.get("telegram_max_mb", 1900)) * 1024 * 1024
+    configured_max_bytes = int(bot_cfg.get("telegram_max_mb", 1900)) \
+        * 1024 * 1024
+    max_bytes = min(configured_max_bytes, TELEGRAM_MAX_UPLOAD_BYTES)
     doc_threshold = int(bot_cfg.get("upload_as_document_if_over_mb", 1800)) \
         * 1024 * 1024
 
@@ -873,7 +880,10 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
 
     uploaded_ok = 0
     uploaded_fail = 0
-    for p in produced:
+    pending_uploads = list(produced)
+    ffmpeg = downloader.ensure_ffmpeg()
+    while pending_uploads:
+        p = pending_uploads.pop(0)
         try:
             size_bytes = p.stat().st_size
             size_mb = size_bytes / 1024 / 1024
@@ -906,6 +916,29 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                     )
             uploaded_ok += 1
         except Exception as e:
+            if is_upload_size_error(e) and p.exists():
+                size_bytes = p.stat().st_size
+                retry_limit = min(max_bytes // 2, size_bytes // 2)
+                if retry_limit > 0:
+                    try:
+                        smaller_parts = await asyncio.to_thread(
+                            downloader.split_by_size_limit,
+                            ffmpeg, p, out_dir, retry_limit)
+                    except Exception as split_error:
+                        log.exception("could not re-split rejected upload %s", p)
+                        log.error("re-split failure: %s", split_error)
+                    else:
+                        if len(smaller_parts) > 1:
+                            try:
+                                p.unlink()
+                            except OSError:
+                                log.warning("could not remove re-split source %s", p)
+                            pending_uploads[:0] = smaller_parts
+                            await q.message.chat.send_message(
+                                "⚠️ Telegram rejected {} as too large; "
+                                "retrying as {} smaller file(s).".format(
+                                    p.name, len(smaller_parts)))
+                            continue
             uploaded_fail += 1
             log.exception("upload failed for %s", p)
             await q.message.chat.send_message(
