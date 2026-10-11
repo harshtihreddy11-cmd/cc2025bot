@@ -1,0 +1,44 @@
+name: cc2025 Telegram Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: cc2025-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Write config files from secrets
+        env:
+          PORTAL_CONFIG_JSON: ${{ secrets.PORTAL_CONFIG_JSON }}
+          BOT_CONFIG_JSON: ${{ secrets.BOT_CONFIG_JSON }}
+        run: |
+          printf '%s' "$PORTAL_CONFIG_JSON" > config.json
+          printf '%s' "$BOT_CONFIG_JSON" > bot_config.json
+
+      - name: Run bot (stops gracefully after 5h50m)
+        run: timeout --signal=INT 350m python bot.py || true
