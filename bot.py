@@ -21,6 +21,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 import downloader
 import stalker
@@ -1090,7 +1091,15 @@ def main():
         except Exception:
             pass
 
-    builder = ApplicationBuilder().token(token)
+    upload_request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30,
+        read_timeout=300,
+        write_timeout=300,
+        media_write_timeout=3600,
+        pool_timeout=60,
+    )
+    builder = ApplicationBuilder().token(token).request(upload_request)
     if local_bot_api_url:
         builder = (
             builder

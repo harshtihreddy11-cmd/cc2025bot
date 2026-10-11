@@ -30,6 +30,9 @@ curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/logOut"
 The response should contain `"result": true`. The token cannot use both API
 servers at the same time.
 
+Large media uploads use extended HTTP timeouts so a slow transfer is not
+aborted by the Telegram client's short default media-upload timeout.
+
 The optional 90-minute split is applied before the upload-size split. If
 FFmpeg cannot produce multiple time-based parts for a file longer than the
 requested interval, the job reports a failure instead of uploading the
