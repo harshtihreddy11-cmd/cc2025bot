@@ -231,6 +231,22 @@ def unique_path(path):
         i += 1
 
 
+def number_parts(parts, base_path):
+    parts = list(parts)
+    if len(parts) < 2:
+        return parts
+
+    numbered = []
+    for index, part in enumerate(parts, 1):
+        destination = unique_path(base_path.with_name(
+            "{}_part_{:03d}{}".format(
+                base_path.stem, index, part.suffix)))
+        if part != destination:
+            part.replace(destination)
+        numbered.append(destination)
+    return numbered
+
+
 def concat_ts(paths, dst_ts):
     with open(dst_ts, "wb") as w:
         for p in paths:
@@ -437,6 +453,8 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
 def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):
     if segment_seconds <= 0:
         return [src_path]
+    if probe_duration_seconds(ffmpeg, src_path) <= segment_seconds:
+        return [src_path]
 
     ext = src_path.suffix
     stem = src_path.stem
@@ -456,6 +474,10 @@ def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):
     parts = sorted(out_dir.glob("{}_tpart_*{}".format(stem, ext)))
     if not parts:
         raise RuntimeError("time-split produced no parts")
+    if len(parts) < 2:
+        raise RuntimeError(
+            "time-split did not split {} despite its duration exceeding "
+            "{} seconds".format(src_path.name, int(segment_seconds)))
     return parts
 
 

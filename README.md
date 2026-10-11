@@ -15,9 +15,17 @@ The runner uses Ubuntu 24.04 explicitly, so it is not affected by the announced
 blocks Actions because of a billing or spending-limit issue; the repository
 owner must resolve that under **Billing & plans** before rerunning it.
 
-Uploads are split to stay below 45,000,000 bytes, with additional size checks
-and automatic re-splitting if Telegram still rejects a part as too large.
-`telegram_max_mb` in `BOT_CONFIG_JSON` can set a lower limit, but a higher
-value does not increase the hosted Bot API upload cap. Audio-only downloads
-require the archive to contain an audio stream; video-only streams are
-reported as unavailable for audio conversion.
+Uploads through Telegram's hosted Bot API are split to stay below 45,000,000
+bytes, with additional size checks and automatic re-splitting if Telegram
+still rejects a part as too large. Its upload limit is much lower than
+Telegram's roughly 2 GB limit for a self-hosted Local Bot API Server, which
+this bot is not configured to use. `telegram_max_mb` in `BOT_CONFIG_JSON` can
+set a lower limit, but a higher value does not increase the hosted Bot API
+upload cap.
+
+The optional 90-minute split is applied before the upload-size split. If
+FFmpeg cannot produce multiple time-based parts for a file longer than the
+requested interval, the job reports a failure instead of uploading the
+unsplit file. Split MP4 and M4A files are numbered `_part_001`, `_part_002`,
+and so on. Audio-only downloads require the archive to contain an audio
+stream; video-only streams are reported as unavailable for audio conversion.

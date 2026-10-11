@@ -412,7 +412,9 @@ def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
                 else:
                     log_("  (time split produced 1 part)")
             except Exception as e:
-                log_("  ⚠️ time-split failed: {}".format(e))
+                raise RuntimeError(
+                    "time-split failed for {}: {}".format(out_path.name, e)
+                ) from e
 
         final_parts = []
         for c in candidates:
@@ -429,6 +431,7 @@ def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
                     pass
             final_parts.extend(sp)
 
+        final_parts = downloader.number_parts(final_parts, out_path)
         produced.extend(final_parts)
 
         try:
@@ -825,19 +828,20 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
     out_dir = OUT_ROOT / "{}_{}".format(d.isoformat(), safe_ch)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    split_label = "no time split" if not time_split_minutes \
-        else "every {} min".format(time_split_minutes)
-    await q.edit_message_text(
-        "✅ *Queued*\n{} · {} programme(s)\nSplit: {}\nStarting…".format(
-            ch_name, len(items), split_label),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
     configured_max_bytes = int(bot_cfg.get("telegram_max_mb", 1900)) \
         * 1024 * 1024
     max_bytes = min(configured_max_bytes, TELEGRAM_MAX_UPLOAD_BYTES)
     doc_threshold = int(bot_cfg.get("upload_as_document_if_over_mb", 1800)) \
         * 1024 * 1024
+
+    split_label = "no time split" if not time_split_minutes \
+        else "every {} min".format(time_split_minutes)
+    await q.edit_message_text(
+        "✅ *Queued*\n{} · {} programme(s)\nSplit: {}\n"
+        "Upload cap: {:.0f} MB/file (Telegram hosted Bot API)\nStarting…"
+        .format(ch_name, len(items), split_label, max_bytes / 1_000_000),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
     reporter = ProgressReporter(
         ctx.bot,
@@ -929,6 +933,8 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                         log.error("re-split failure: %s", split_error)
                     else:
                         if len(smaller_parts) > 1:
+                            smaller_parts = downloader.number_parts(
+                                smaller_parts, p)
                             try:
                                 p.unlink()
                             except OSError:
