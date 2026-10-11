@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# STB UA - used for portal AND for the archive CDN when no auth is needed.
 STB_UA = ("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 "
           "(KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3")
 
@@ -28,8 +27,6 @@ class Session:
         self.random = None
         self.profile = {}
         self._profile_ok = False
-
-    # ---------- headers ----------
 
     def _portal_headers(self, extra=None):
         mac = urllib.parse.quote(self.cfg["mac"], safe="")
@@ -52,11 +49,6 @@ class Session:
         return h
 
     def _cdn_headers(self, extra=None):
-        """
-        Headers for the archive CDN (flussonic/dvr).
-        Do NOT send the portal Cookie/Authorization - many CDNs 403 on
-        unknown cookies. The token is embedded in the archive URL.
-        """
         h = {
             "User-Agent": STB_UA,
             "Accept": "*/*",
@@ -66,14 +58,10 @@ class Session:
             h.update(extra)
         return h
 
-    # ---------- POST (portal API) ----------
-
     def post(self, params, retries=3, timeout=30):
         params = dict(params)
         params.setdefault("JsHttpRequest", "1-xml")
         body = urllib.parse.urlencode(params).encode()
-        # cc2025 accepts the JsHttpRequest param on the URL OR in the body.
-        # Putting it on the URL is what the STB firmware does.
         url = self.cfg["portal"] + "?JsHttpRequest=1-xml"
         last = None
         for attempt in range(1, retries + 1):
@@ -100,14 +88,8 @@ class Session:
                     time.sleep(1.5 * attempt)
         raise RuntimeError("portal POST failed: {}".format(last))
 
-    # ---------- GET (playlists) ----------
-
     def get(self, url, extra_headers=None, retries=3, timeout=30,
             use_auth=False):
-        """
-        GET a playlist. Default use_auth=False because archive/EPG m3u8s
-        live on the CDN and reject portal cookies.
-        """
         headers = self._portal_headers(extra_headers) if use_auth \
             else self._cdn_headers(extra_headers)
         last = None
@@ -117,7 +99,6 @@ class Session:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     return r.read(), r.status
             except urllib.error.HTTPError as e:
-                # 4xx (except 429) are permanent.
                 if 400 <= e.code < 500 and e.code != 429:
                     body = ""
                     try:
@@ -321,11 +302,6 @@ def fetch_epg(sess, ch_id, date_str, log=print):
 # =============================================================
 
 def create_archive_link(sess, ch_id, epg_id, log=print):
-    """
-    cc2025 panels return the full archive URL in js['cmd'] for newer
-    panels. Older panels return 'auto /media/<id>.mpg' and the URL is
-    in js['link'] / js['url'] / js['archive_url'] / js['id'].
-    """
     r = call(sess, {
         "type": "tv_archive", "action": "create_link",
         "cmd": "auto /media/{}.mpg".format(epg_id),
@@ -339,15 +315,12 @@ def create_archive_link(sess, ch_id, epg_id, log=print):
 
     url = js.get("cmd") or ""
     if url and not url.startswith("http"):
-        # legacy portal - try alternate keys
         for key in ("link", "url", "archive_url", "id"):
             v = js.get(key) or ""
             if isinstance(v, str) and v.startswith("http"):
                 url = v
                 break
 
-    # Some cc2025 panels return the URL under js['cmd'] as
-    # 'ffmpeg http://...' or 'auto http://...' - strip the verb.
     if url and not url.startswith("http"):
         m = re.search(r"(https?://\S+)", url)
         if m:
@@ -357,13 +330,10 @@ def create_archive_link(sess, ch_id, epg_id, log=print):
 
 
 # =============================================================
-# m3u8 parsing (handles fMP4 + master playlists)
+# m3u8 parsing
 # =============================================================
 
 def parse_m3u8(text, base_url):
-    """
-    Returns (variants, init_segments, media_segments, is_master).
-    """
     variants = []
     segments = []
     init_segments = []
@@ -461,10 +431,6 @@ def fetch_archive_segments(
     quality="lowest",
     want_audio=False,
 ):
-    """
-    Resolve the archive m3u8 for one EPG record and return
-    (segments_to_download, prog_abs_start, init_segments).
-    """
     epg_id = prog.get("id")
     if not epg_id:
         raise RuntimeError("no epg id")
@@ -480,7 +446,6 @@ def fetch_archive_segments(
 
     log("archive: {}...".format(archive_url[:120]))
 
-    # CDN fetch - no portal auth.
     raw, _ = sess.get(archive_url, use_auth=False)
     text = raw.decode("utf-8", errors="replace")
 
@@ -513,7 +478,6 @@ def fetch_archive_segments(
     if not segs:
         raise RuntimeError("variant playlist empty")
 
-    # Anchor time
     prog_abs_start = int(prog["start_timestamp"])
     first_pdt = next((pdt_to_epoch(s["pdt"]) for s in segs
                       if pdt_to_epoch(s["pdt"])), None)
