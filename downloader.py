@@ -381,6 +381,50 @@ def has_audio_stream(src_path):
     return bool(result.stdout.strip())
 
 
+def probe_video_metadata(src_path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("ffprobe not found on PATH")
+    result = subprocess.run([
+        ffprobe, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,duration:format=duration",
+        "-of", "json",
+        str(src_path),
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError("ffprobe failed: {}".format(error))
+    try:
+        data = _json.loads(result.stdout.decode("utf-8", "replace"))
+        stream = data["streams"][0]
+        duration = float(stream.get("duration") or data["format"]["duration"])
+        width = int(stream["width"])
+        height = int(stream["height"])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "could not determine video duration and dimensions for {}".format(
+                src_path)) from exc
+    if duration <= 0 or width <= 0 or height <= 0:
+        raise RuntimeError("invalid video metadata for {}".format(src_path))
+    return duration, width, height
+
+
+def extract_video_thumbnail(ffmpeg, src_path, thumbnail_path, timestamp):
+    _run_ffmpeg([
+        ffmpeg, "-y", "-loglevel", "error",
+        "-ss", str(max(0, float(timestamp))),
+        "-i", str(src_path),
+        "-frames:v", "1",
+        "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+        "-q:v", "4",
+        str(thumbnail_path),
+    ])
+    if not thumbnail_path.exists() or thumbnail_path.stat().st_size == 0:
+        raise RuntimeError("ffmpeg produced no thumbnail for {}".format(
+            src_path))
+
+
 def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
@@ -424,6 +468,7 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
                 "-segment_time", str(segment_seconds),
                 "-reset_timestamps", "1",
                 "-avoid_negative_ts", "make_zero",
+                "-segment_format_options", "movflags=+faststart",
                 str(pattern),
             ])
             parts = sorted(tmp_dir.glob(
@@ -469,6 +514,7 @@ def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):
         "-segment_time", str(int(segment_seconds)),
         "-reset_timestamps", "1",
         "-avoid_negative_ts", "make_zero",
+        "-segment_format_options", "movflags=+faststart",
         pattern,
     ])
     parts = sorted(out_dir.glob("{}_tpart_*{}".format(stem, ext)))

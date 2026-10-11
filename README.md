@@ -32,6 +32,9 @@ servers at the same time.
 
 Large media uploads use extended HTTP timeouts so a slow transfer is not
 aborted by the Telegram client's short default media-upload timeout.
+MP4 splits are written with fast-start metadata. Before sending MP4s as
+videos, the bot probes their duration and dimensions and creates a JPEG
+thumbnail from a frame near the middle of each part.
 
 The optional 90-minute split is applied before the upload-size split. If
 FFmpeg cannot produce multiple time-based parts for a file longer than the

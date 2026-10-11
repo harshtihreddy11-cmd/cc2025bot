@@ -908,12 +908,56 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
             send_native = size_bytes <= doc_threshold
             with open(p, "rb") as f:
                 if suffix == ".mp4" and send_native:
-                    await q.message.chat.send_video(
-                        video=f,
-                        filename=p.name,
-                        caption=p.name,
-                        supports_streaming=True,
-                    )
+                    thumbnail_path = None
+                    thumbnail_ready = False
+                    video_options = {"supports_streaming": True}
+                    try:
+                        try:
+                            duration, width, height = \
+                                downloader.probe_video_metadata(p)
+                            video_options.update({
+                                "duration": max(1, round(duration)),
+                                "width": width,
+                                "height": height,
+                            })
+                            thumbnail_path = downloader.unique_path(
+                                p.with_name(p.stem + "_thumbnail.jpg"))
+                            downloader.extract_video_thumbnail(
+                                ffmpeg, p, thumbnail_path, duration / 2)
+                            thumbnail_ready = True
+                        except Exception as preview_error:
+                            log.warning(
+                                "could not prepare video preview for %s: %s",
+                                p.name, preview_error)
+                            await q.message.chat.send_message(
+                                "⚠️ Could not prepare the video preview for {}: "
+                                "{}. Sending without a custom preview.".format(
+                                    p.name, preview_error))
+
+                        if thumbnail_ready:
+                            with open(thumbnail_path, "rb") as thumbnail:
+                                await q.message.chat.send_video(
+                                    video=f,
+                                    filename=p.name,
+                                    caption=p.name,
+                                    thumbnail=thumbnail,
+                                    **video_options,
+                                )
+                        else:
+                            await q.message.chat.send_video(
+                                video=f,
+                                filename=p.name,
+                                caption=p.name,
+                                **video_options,
+                            )
+                    finally:
+                        if thumbnail_path and thumbnail_path.exists():
+                            try:
+                                thumbnail_path.unlink()
+                            except OSError as cleanup_error:
+                                log.warning(
+                                    "could not remove video thumbnail %s: %s",
+                                    thumbnail_path, cleanup_error)
                 elif suffix == ".m4a" and send_native:
                     await q.message.chat.send_audio(
                         audio=f,
