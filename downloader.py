@@ -13,7 +13,6 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# STB UA - accepted by cc2025's archive CDN.
 STB_UA = ("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 "
           "(KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3")
 
@@ -22,10 +21,6 @@ DEFAULT_SEGMENT_TIMEOUT = 20
 
 _segment_connections = threading.local()
 
-
-# =============================================================
-# Fast keep-alive segment fetcher
-# =============================================================
 
 def _segment_connection(scheme, netloc, timeout):
     connections = getattr(_segment_connections, "connections", None)
@@ -52,11 +47,6 @@ def _parse_retry_after(headers, default):
 
 def fetch_segment(url, timeout=DEFAULT_SEGMENT_TIMEOUT, attempts=3,
                   max_redirects=5, referer=None, host=None):
-    """
-    GET a segment with a persistent per-thread connection.
-    Retries on network errors, 429 and 5xx; fails fast on other 4xx.
-    Follows redirects.
-    """
     cur = url
     for _ in range(max_redirects + 1):
         parsed = urllib.parse.urlparse(cur)
@@ -130,7 +120,6 @@ def fetch_segment(url, timeout=DEFAULT_SEGMENT_TIMEOUT, attempts=3,
 
 def download_segment(sess, url, dst, timeout=DEFAULT_SEGMENT_TIMEOUT,
                      referer=None, host=None):
-    # Clean stale .part from a previous crash.
     part = dst.with_name(dst.name + ".part")
     if part.exists():
         try:
@@ -146,10 +135,6 @@ def download_segment(sess, url, dst, timeout=DEFAULT_SEGMENT_TIMEOUT,
     part.replace(dst)
     return len(data)
 
-
-# =============================================================
-# Segment downloader (parallel, with retry passes)
-# =============================================================
 
 def download_segments(
     sess,
@@ -224,10 +209,6 @@ def download_segments(
     return [p for p in results if p], total
 
 
-# =============================================================
-# Helpers
-# =============================================================
-
 def sanitize_filename(name, max_len=120):
     name = re.sub(r"[\\/:*?\"<>|]+", "_", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -278,7 +259,6 @@ def remux_ts_to_mp4(ffmpeg, ts_path, mp4_path):
 
 
 def extract_audio_to_m4a(ffmpeg, ts_path, m4a_path):
-    """TS -> M4A, stream copy first, re-encode on failure."""
     copy_cmd = [
         ffmpeg, "-y", "-loglevel", "error",
         "-i", str(ts_path),
@@ -304,10 +284,6 @@ def extract_audio_to_m4a(ffmpeg, ts_path, m4a_path):
 
 
 def extract_audio_from_segments(ffmpeg, segment_paths, m4a_path):
-    """
-    Pipe .ts segments straight into ffmpeg (stream copy of the audio).
-    Raises RuntimeError on failure so the caller can fall back.
-    """
     cmd = [
         ffmpeg, "-y", "-loglevel", "error",
         "-f", "mpegts", "-i", "pipe:0",
