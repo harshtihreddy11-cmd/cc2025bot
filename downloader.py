@@ -353,4 +353,84 @@ def probe_duration_seconds(ffmpeg, src_path):
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
-       
+        if result.returncode == 0:
+            try:
+                data = _json.loads(result.stdout.decode("utf-8", "replace"))
+                return float(data["format"]["duration"])
+            except Exception:
+                pass
+    cmd = [ffmpeg, "-i", str(src_path)]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    err = result.stderr.decode("utf-8", "replace")
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", err)
+    if not m:
+        raise RuntimeError("could not determine duration of {}".format(
+            src_path))
+    h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    return h * 3600 + mi * 60 + s
+
+
+def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95):
+    size = src_path.stat().st_size
+    if size <= max_bytes:
+        return [src_path]
+
+    duration = probe_duration_seconds(ffmpeg, src_path)
+    if duration <= 0:
+        raise RuntimeError("invalid duration for split")
+
+    bps = size / duration
+    target_bytes = max_bytes * headroom
+    segment_seconds = max(60, int(target_bytes / bps))
+
+    ext = src_path.suffix
+    stem = src_path.stem
+    pattern = str(out_dir / "{}_part_%03d{}".format(stem, ext))
+    _run_ffmpeg([
+        ffmpeg, "-y",
+        "-i", str(src_path),
+        "-c", "copy",
+        "-map", "0",
+        "-f", "segment",
+        "-segment_time", str(segment_seconds),
+        "-reset_timestamps", "1",
+        "-avoid_negative_ts", "make_zero",
+        pattern,
+    ])
+    parts = sorted(out_dir.glob("{}_part_*{}".format(stem, ext)))
+    if not parts:
+        raise RuntimeError("split produced no parts")
+    return parts
+
+
+def split_by_duration(ffmpeg, src_path, out_dir, segment_seconds):
+    if segment_seconds <= 0:
+        return [src_path]
+
+    ext = src_path.suffix
+    stem = src_path.stem
+    pattern = str(out_dir / "{}_tpart_%03d{}".format(stem, ext))
+    _run_ffmpeg([
+        ffmpeg, "-y",
+        "-loglevel", "error",
+        "-i", str(src_path),
+        "-c", "copy",
+        "-map", "0",
+        "-f", "segment",
+        "-segment_time", str(int(segment_seconds)),
+        "-reset_timestamps", "1",
+        "-avoid_negative_ts", "make_zero",
+        pattern,
+    ])
+    parts = sorted(out_dir.glob("{}_tpart_*{}".format(stem, ext)))
+    if not parts:
+        raise RuntimeError("time-split produced no parts")
+    return parts
+
+
+def ensure_ffmpeg():
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        raise RuntimeError("ffmpeg not found on PATH")
+    return ff
