@@ -443,7 +443,7 @@ def _concat_media_parts(ffmpeg, parts, destination):
 
 
 def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95,
-                        _reencode_initial=False, log=print):
+                        log=print):
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     if not 0 < headroom < 1:
@@ -458,37 +458,6 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95,
 
     with tempfile.TemporaryDirectory(prefix=".size_split_", dir=out_dir) as tmp:
         tmp_dir = Path(tmp)
-        if _reencode_initial:
-            log("  ⚠️ balancing MP4 chunks with re-encoding: {}".format(
-                src_path.name))
-            duration = probe_duration_seconds(ffmpeg, src_path)
-            if duration <= 0:
-                raise RuntimeError("invalid duration for split")
-            target_bytes = min(max_bytes * headroom, src_path.stat().st_size / 2)
-            segment_seconds = max(
-                1, int(duration * target_bytes / src_path.stat().st_size))
-            pattern = tmp_dir / "balanced_part_%03d.mp4"
-            _run_ffmpeg([
-                ffmpeg, "-y", "-loglevel", "error",
-                "-i", str(src_path),
-                "-map", "0:v:0?", "-map", "0:a:0?", "-sn",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-force_key_frames",
-                "expr:gte(t,n_forced*{})".format(segment_seconds),
-                "-c:a", "aac", "-b:a", "192k",
-                "-f", "segment",
-                "-segment_time", str(segment_seconds),
-                "-reset_timestamps", "1",
-                "-avoid_negative_ts", "make_zero",
-                "-segment_format_options", "movflags=+faststart",
-                str(pattern),
-            ])
-            initial_parts = sorted(tmp_dir.glob("balanced_part_*.mp4"))
-            if len(initial_parts) < 2:
-                raise RuntimeError(
-                    "re-encoded size split produced fewer than two parts")
-            queue = [(part, 0, True)
-                     for part in reversed(initial_parts)]
 
         while queue:
             current, depth, is_temporary = queue.pop()
@@ -603,15 +572,6 @@ def split_by_size_limit(ffmpeg, src_path, out_dir, max_bytes, headroom=0.95,
             part.replace(destination)
             result.append(destination)
 
-    minimum_parts = (src_path.stat().st_size + max_bytes - 1) // max_bytes
-    if not _reencode_initial and src_path.suffix.lower() == ".mp4" \
-            and len(result) > minimum_parts:
-        for part in result:
-            part.unlink()
-        return split_by_size_limit(
-            ffmpeg, src_path, out_dir, max_bytes, headroom,
-            _reencode_initial=True, log=log,
-        )
     return result
 
 
