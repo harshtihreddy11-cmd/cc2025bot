@@ -1,0 +1,9 @@
+config.json
+bot_config.json
+channels.json
+downloads/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.part
