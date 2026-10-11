@@ -32,6 +32,7 @@ BOT_CONFIG_PATH = BASE / "bot_config.json"
 CHANNELS_CACHE = BASE / "channels.json"
 OUT_ROOT = BASE / "downloads"
 TELEGRAM_MAX_UPLOAD_BYTES = 45_000_000
+LOCAL_BOT_API_MAX_UPLOAD_BYTES = 1900 * 1024 * 1024
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -830,16 +831,22 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
 
     configured_max_bytes = int(bot_cfg.get("telegram_max_mb", 1900)) \
         * 1024 * 1024
-    max_bytes = min(configured_max_bytes, TELEGRAM_MAX_UPLOAD_BYTES)
+    local_bot_api_url = bot_cfg.get("local_bot_api_url")
+    upload_limit = LOCAL_BOT_API_MAX_UPLOAD_BYTES \
+        if local_bot_api_url else TELEGRAM_MAX_UPLOAD_BYTES
+    max_bytes = min(configured_max_bytes, upload_limit)
     doc_threshold = int(bot_cfg.get("upload_as_document_if_over_mb", 1800)) \
         * 1024 * 1024
 
     split_label = "no time split" if not time_split_minutes \
         else "every {} min".format(time_split_minutes)
+    api_mode = "Local Bot API Server" if local_bot_api_url \
+        else "hosted Bot API"
     await q.edit_message_text(
         "✅ *Queued*\n{} · {} programme(s)\nSplit: {}\n"
-        "Upload cap: {:.0f} MB/file (Telegram hosted Bot API)\nStarting…"
-        .format(ch_name, len(items), split_label, max_bytes / 1_000_000),
+        "Upload cap: {:.0f} MiB/file ({})\nStarting…"
+        .format(ch_name, len(items), split_label,
+                max_bytes / (1024 * 1024), api_mode),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -1071,6 +1078,11 @@ def main():
     token = bot_cfg["bot_token"]
     if not token or token == "YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set bot_token in bot_config.json")
+    local_bot_api_url = bot_cfg.get("local_bot_api_url")
+    if local_bot_api_url is not None:
+        if not isinstance(local_bot_api_url, str) or not local_bot_api_url.strip():
+            raise SystemExit("local_bot_api_url must be a non-empty URL")
+        local_bot_api_url = local_bot_api_url.strip().rstrip("/")
 
     if bot_cfg.get("delete_everything_after_upload", True):
         try:
@@ -1078,12 +1090,15 @@ def main():
         except Exception:
             pass
 
-    app = (
-        ApplicationBuilder()
-        .token(token)
-        .post_init(post_init)
-        .build()
-    )
+    builder = ApplicationBuilder().token(token)
+    if local_bot_api_url:
+        builder = (
+            builder
+            .base_url(local_bot_api_url + "/bot")
+            .base_file_url(local_bot_api_url + "/file/bot")
+            .local_mode(True)
+        )
+    app = builder.post_init(post_init).build()
     app.bot_data["bot_cfg"] = bot_cfg
     app.bot_data["running_jobs"] = 0
 

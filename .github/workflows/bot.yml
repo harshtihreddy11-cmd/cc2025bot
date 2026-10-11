@@ -56,6 +56,38 @@ jobs:
               bot_config = json.load(config_file)
           if not isinstance(bot_config.get("bot_token"), str) or not bot_config["bot_token"].strip():
               raise SystemExit("bot_config.json must contain a non-empty bot_token")
+          bot_config["local_bot_api_url"] = "http://127.0.0.1:8081"
+          Path("bot_config.json").write_text(json.dumps(bot_config))
+          PY
+
+      - name: Start Local Bot API Server
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          set -eu
+          test -n "$TELEGRAM_API_ID" || { echo "::error::Add the TELEGRAM_API_ID repository secret."; exit 1; }
+          test -n "$TELEGRAM_API_HASH" || { echo "::error::Add the TELEGRAM_API_HASH repository secret."; exit 1; }
+          docker run --detach \
+            --name telegram-bot-api \
+            --publish 127.0.0.1:8081:8081 \
+            --env TELEGRAM_API_ID \
+            --env TELEGRAM_API_HASH \
+            --env TELEGRAM_LOCAL=1 \
+            aiogram/telegram-bot-api:latest
+          python - <<'PY'
+          import socket
+          import time
+
+          for _ in range(60):
+              try:
+                  with socket.create_connection(("127.0.0.1", 8081), timeout=1):
+                      print("Local Bot API Server is listening.")
+                      break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Local Bot API Server failed to start.")
           PY
 
       - name: Run bot (stops gracefully after 5h50m)

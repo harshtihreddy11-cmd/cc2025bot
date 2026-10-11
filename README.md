@@ -8,6 +8,7 @@ on its next scheduled run. To enable it:
 1. Add these repository secrets under **Settings > Secrets and variables > Actions**:
 	- `PORTAL_CONFIG_JSON`: the complete JSON object normally stored in `config.json`.
 	- `BOT_CONFIG_JSON`: the complete JSON object normally stored in `bot_config.json`, including a non-empty `bot_token`.
+	- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`: application credentials from [my.telegram.org](https://my.telegram.org), required to run Telegram's Local Bot API Server.
 2. In **Actions**, enable workflows for the repository and run **cc2025 Telegram Bot** manually once, or wait for its six-hour schedule.
 
 The runner uses Ubuntu 24.04 explicitly, so it is not affected by the announced
@@ -15,13 +16,19 @@ The runner uses Ubuntu 24.04 explicitly, so it is not affected by the announced
 blocks Actions because of a billing or spending-limit issue; the repository
 owner must resolve that under **Billing & plans** before rerunning it.
 
-Uploads through Telegram's hosted Bot API are split to stay below 45,000,000
-bytes, with additional size checks and automatic re-splitting if Telegram
-still rejects a part as too large. Its upload limit is much lower than
-Telegram's roughly 2 GB limit for a self-hosted Local Bot API Server, which
-this bot is not configured to use. `telegram_max_mb` in `BOT_CONFIG_JSON` can
-set a lower limit, but a higher value does not increase the hosted Bot API
-upload cap.
+The workflow starts a Local Bot API Server and configures the bot to use it,
+allowing uploads up to 1900 MiB per file (subject to `telegram_max_mb` in
+`BOT_CONFIG_JSON`). The server requires `TELEGRAM_API_ID` and
+`TELEGRAM_API_HASH` secrets. Before switching a bot token from Telegram's
+hosted Bot API to the Local Bot API Server for the first time, log it out of
+the hosted API, then wait at least 10 minutes before starting the workflow:
+
+```sh
+curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/logOut"
+```
+
+The response should contain `"result": true`. The token cannot use both API
+servers at the same time.
 
 The optional 90-minute split is applied before the upload-size split. If
 FFmpeg cannot produce multiple time-based parts for a file longer than the
