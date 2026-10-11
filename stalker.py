@@ -251,20 +251,36 @@ def load_channels(sess, cache_path, refresh=False, log=print):
 
 
 def iter_channels(listing):
-    js = listing.get("js", {})
-    data = js.get("data", []) if isinstance(js, dict) else (js or [])
+    if not isinstance(listing, dict):
+        return iter(())
+    js = listing.get("js") or {}
+    if not isinstance(js, dict):
+        return iter(())
+    data = js.get("data") or []
+    if not isinstance(data, list):
+        return iter(())
     return iter(data)
 
 
 def channel_id_of(ch):
-    return str(ch.get("id"))
+    if not isinstance(ch, dict):
+        return ""
+    ch_id = ch.get("id")
+    return "" if ch_id is None else str(ch_id)
 
 
 def cmd_id_of(ch):
+    if not isinstance(ch, dict):
+        return ""
     cmds = ch.get("cmds") or []
-    if cmds:
-        return str(cmds[0].get("id"))
-    return str(ch.get("id"))
+    if isinstance(cmds, list):
+        for cmd in cmds:
+            if isinstance(cmd, dict):
+                cmd_id = cmd.get("id")
+                if cmd_id is not None:
+                    return str(cmd_id)
+    ch_id = ch.get("id")
+    return "" if ch_id is None else str(ch_id)
 
 
 # =============================================================

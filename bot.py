@@ -139,14 +139,17 @@ def load_all_channels_blocking():
 def search_channels(channels, term, limit=25):
     if not term:
         return channels[:limit]
-    t = term.lower()
+    t = str(term).lower()
     return [
         c
         for c in channels
-        if t in (c.get("name") or "").lower()
-        or t == str(c.get("number", "")).strip()
-        or t == stalker.channel_id_of(c)
-        or t == stalker.cmd_id_of(c)
+        if isinstance(c, dict)
+        and (
+            t in (c.get("name") or "").lower()
+            or t == str(c.get("number", "")).strip()
+            or t == stalker.channel_id_of(c)
+            or t == stalker.cmd_id_of(c)
+        )
     ][:limit]
 
 
