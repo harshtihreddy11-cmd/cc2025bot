@@ -8,7 +8,7 @@ import queue
 import shutil as _sh
 import time as _time
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -196,7 +196,9 @@ def kb_day_picker(ch_id):
     ])
 
 
-def kb_programmes(ch_id, date_str, programmes, page=0, per_page=8):
+def kb_programmes(ch_id, date_str, programmes, page=0, per_page=8,
+                  selection_mode=False, selected_indices=None):
+    selected_indices = set(selected_indices or [])
     start = page * per_page
     chunk = programmes[start:start + per_page]
     rows = []
@@ -206,8 +208,16 @@ def kb_programmes(ch_id, date_str, programmes, page=0, per_page=8):
         en = datetime.fromtimestamp(int(p["stop_timestamp"]), IST)
         name = (p.get("name") or "?")[:28]
         label = "{:%H:%M}–{:%H:%M}  {}".format(st, en, name)
+        if selection_mode:
+            label = "{} {}".format(
+                "✅" if idx in selected_indices else "▫️", label)
         rows.append([
-            InlineKeyboardButton(label, callback_data="prog|{}|{}|{}".format(ch_id, date_str, idx))
+            InlineKeyboardButton(
+                label,
+                callback_data=(
+                    "progtoggle|{}".format(idx) if selection_mode else
+                    "prog|{}|{}|{}".format(ch_id, date_str, idx)),
+            )
         ])
     nav = []
     if page > 0:
@@ -220,6 +230,32 @@ def kb_programmes(ch_id, date_str, programmes, page=0, per_page=8):
         )
     if nav:
         rows.append(nav)
+    if selection_mode:
+        rows.append([
+            InlineKeyboardButton(
+                "✅ Download selected ({})".format(len(selected_indices)),
+                callback_data="progselected",
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton("Clear selection",
+                                 callback_data="progclear"),
+            InlineKeyboardButton("Exit select",
+                                 callback_data="progselect_exit|{}".format(page)),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                "☑️ Select multiple programmes",
+                callback_data="progselect|{}".format(page),
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                "🕒 Enter start/end time (IST)",
+                callback_data="timerange",
+            )
+        ])
     rows.append([
         InlineKeyboardButton("📥 Download whole day", callback_data="allday|{}|{}".format(ch_id, date_str))
     ])
@@ -273,8 +309,52 @@ def kb_time_split_allday(ch_id, date_str, media, options):
     return InlineKeyboardMarkup(rows)
 
 
+def kb_batch_media():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Video (MP4)", callback_data="batchmedia|v")],
+        [InlineKeyboardButton("🎵 Audio only (M4A)", callback_data="batchmedia|a")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="nav|main")],
+    ])
+
+
+def kb_batch_time_split(media, options):
+    rows = []
+    for mins in options:
+        label = "No time split" if mins == 0 else "Every {} min".format(mins)
+        rows.append([
+            InlineKeyboardButton(
+                label, callback_data="batchsplit|{}|{}".format(media, mins))
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Back",
+                                     callback_data="batchmedia_back")])
+    return InlineKeyboardMarkup(rows)
+
+
 def kb_back_main():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main menu", callback_data="nav|main")]])
+
+
+def selected_programme_items(programmes, indices):
+    items = []
+    for idx in sorted(indices):
+        if 0 <= idx < len(programmes):
+            prog = programmes[idx]
+            items.append((
+                prog,
+                int(prog["start_timestamp"]),
+                int(prog["stop_timestamp"]),
+            ))
+    return items
+
+
+async def prompt_batch_media(target, ctx, items):
+    ctx.user_data["pending_items"] = items
+    text = "{} programme(s) selected.\nChoose download format:".format(
+        len(items))
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(text, reply_markup=kb_batch_media())
+    else:
+        await target.reply_text(text, reply_markup=kb_batch_media())
 
 
 def run_download_job(cfg, ch, media, d, prog_items, max_bytes,
@@ -528,9 +608,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "2. Tap *Search channel* and type a name / number\n"
                 "3. Tap a result\n"
                 "4. Pick a day\n"
-                "5. Tap a programme (or *Download whole day*)\n"
-                "6. Choose Video or Audio\n"
-                "7. Choose split option (No split / Every 90 min)\n\n"
+                "5. Tap a programme, select multiple, enter an IST time "
+                "range, or download the whole day\n"
+                "6. Choose Video or Audio, then a split option\n\n"
                 "Channels with ✅ support catchup.\n"
                 "Progress is shown live, then the file is uploaded.\n"
                 "All files are deleted from disk after upload.",
@@ -587,6 +667,127 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ch_id, date_str, page = parts[1], parts[2], int(parts[3])
         d = datetime.strptime(date_str, "%Y-%m-%d").date()
         await show_programmes(q, ctx, ch_id, d, page=page)
+        return
+
+    if kind == "progselect":
+        cached = ctx.user_data.get("programmes") or {}
+        if cached.get("ch_id") is None:
+            await q.edit_message_text(
+                "Session expired. Please pick the channel again.",
+                reply_markup=kb_back_main(),
+            )
+            return
+        ctx.user_data["programme_selection_active"] = True
+        ctx.user_data["programme_selection"] = set()
+        await show_programmes_page(q, ctx, int(parts[1]))
+        return
+
+    if kind == "progtoggle":
+        selected = ctx.user_data.setdefault("programme_selection", set())
+        if not isinstance(selected, set):
+            selected = set(selected)
+            ctx.user_data["programme_selection"] = selected
+        idx = int(parts[1])
+        cached = ctx.user_data.get("programmes") or {}
+        if not (0 <= idx < len(cached.get("list") or [])):
+            await q.edit_message_text("Session expired.",
+                                      reply_markup=kb_back_main())
+            return
+        if idx in selected:
+            selected.remove(idx)
+        else:
+            selected.add(idx)
+        await show_programmes_page(
+            q, ctx, int(ctx.user_data.get("programme_selection_page", 0)))
+        return
+
+    if kind == "progclear":
+        ctx.user_data["programme_selection"] = set()
+        await show_programmes_page(
+            q, ctx, int(ctx.user_data.get("programme_selection_page", 0)))
+        return
+
+    if kind == "progselect_exit":
+        ctx.user_data["programme_selection_active"] = False
+        ctx.user_data["programme_selection"] = set()
+        await show_programmes_page(q, ctx, int(parts[1]))
+        return
+
+    if kind == "progselected":
+        cached = ctx.user_data.get("programmes") or {}
+        items = selected_programme_items(
+            cached.get("list") or [],
+            ctx.user_data.get("programme_selection", set()),
+        )
+        if not items:
+            await q.answer("Select at least one programme.", show_alert=True)
+            return
+        ctx.user_data["programme_selection_active"] = False
+        await prompt_batch_media(q, ctx, items)
+        return
+
+    if kind == "timerange":
+        cached = ctx.user_data.get("programmes") or {}
+        if not cached.get("list"):
+            await q.edit_message_text("Session expired.",
+                                      reply_markup=kb_back_main())
+            return
+        ctx.user_data["awaiting"] = "range_start"
+        await q.edit_message_text(
+            "Send the *start time* in IST for {} "
+            "(24-hour `HH:MM`, e.g. `13:30`). The range must end later "
+            "on the same date.".format(cached["date"]),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Cancel", callback_data="range_cancel")
+            ]]),
+        )
+        return
+
+    if kind == "range_cancel":
+        ctx.user_data["awaiting"] = None
+        await show_programmes_page(
+            q, ctx, int(ctx.user_data.get("programme_selection_page", 0)))
+        return
+
+    if kind == "batchmedia":
+        items = ctx.user_data.get("pending_items") or []
+        if not items:
+            await q.edit_message_text("Selection expired.",
+                                      reply_markup=kb_back_main())
+            return
+        media = parts[1]
+        options = ctx.application.bot_data["bot_cfg"].get(
+            "time_split_options_minutes", [0, 90])
+        await q.edit_message_text(
+            "✂️ Split each of the {} programme(s) before uploading?".format(
+                len(items)),
+            reply_markup=kb_batch_time_split(media, options),
+        )
+        return
+
+    if kind == "batchmedia_back":
+        items = ctx.user_data.get("pending_items") or []
+        if items:
+            await prompt_batch_media(q, ctx, items)
+        else:
+            await q.edit_message_text("Selection expired.",
+                                      reply_markup=kb_back_main())
+        return
+
+    if kind == "batchsplit":
+        cached = ctx.user_data.get("programmes") or {}
+        items = ctx.user_data.get("pending_items") or []
+        if not items or not cached.get("channel"):
+            await q.edit_message_text("Selection expired.",
+                                      reply_markup=kb_back_main())
+            return
+        media, mins = parts[1], int(parts[2])
+        d = datetime.strptime(cached["date"], "%Y-%m-%d").date()
+        await start_job(
+            q, ctx, cached["channel"], media, d, items,
+            time_split_minutes=mins,
+        )
         return
 
     if kind == "prog":
@@ -759,6 +960,10 @@ async def show_day_picker(q, ctx, ch_id):
         return
 
     ctx.user_data["current_channel"] = ch
+    ctx.user_data["awaiting"] = None
+    ctx.user_data["programme_selection_active"] = False
+    ctx.user_data["programme_selection"] = set()
+    ctx.user_data.pop("pending_items", None)
     recent = ctx.user_data.get("recent_channels", [])
     if ch_id in recent:
         recent.remove(ch_id)
@@ -794,6 +999,12 @@ async def show_programmes(q, ctx, ch_id, d, page=0):
                                   reply_markup=kb_back_main())
         return
 
+    old_programmes = ctx.user_data.get("programmes") or {}
+    if old_programmes.get("ch_id") != ch_id \
+            or old_programmes.get("date") != date_str:
+        ctx.user_data["programme_selection_active"] = False
+        ctx.user_data["programme_selection"] = set()
+        ctx.user_data.pop("pending_items", None)
     progs.sort(key=lambda p: int(p["start_timestamp"]))
     ctx.user_data["programmes"] = {
         "ch_id": ch_id, "date": date_str, "list": progs, "channel": ch}
@@ -807,20 +1018,54 @@ async def show_programmes(q, ctx, ch_id, d, page=0):
     await q.edit_message_text(
         "🎬 *{}*\n📅 {}\n{} programmes — tap one:".format(
             ch.get("name"), date_str, len(progs)),
-        reply_markup=kb_programmes(ch_id, date_str, progs, page=page),
+        reply_markup=kb_programmes(
+            ch_id, date_str, progs, page=page,
+            selection_mode=ctx.user_data.get(
+                "programme_selection_active", False),
+            selected_indices=ctx.user_data.get("programme_selection", set()),
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    ctx.user_data["programme_selection_page"] = page
+
+
+async def show_programmes_page(q, ctx, page):
+    cached = ctx.user_data.get("programmes") or {}
+    programmes = cached.get("list") or []
+    if not programmes:
+        await q.edit_message_text(
+            "Session expired. Please pick the channel again.",
+            reply_markup=kb_back_main(),
+        )
+        return
+    selection_mode = ctx.user_data.get("programme_selection_active", False)
+    ctx.user_data["programme_selection_page"] = page
+    await q.edit_message_text(
+        "🎬 *{}*\n📅 {}\n{} programmes — {}:".format(
+            cached["channel"].get("name"), cached["date"], len(programmes),
+            "tap programmes to select" if selection_mode else "tap one"),
+        reply_markup=kb_programmes(
+            cached["ch_id"], cached["date"], programmes, page=page,
+            selection_mode=selection_mode,
+            selected_indices=ctx.user_data.get("programme_selection", set()),
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
+    origin_message = q.message if hasattr(q, "message") else q
+    chat = origin_message.chat
     app = ctx.application
     bot_cfg = app.bot_data["bot_cfg"]
     max_jobs = bot_cfg.get("max_concurrent_jobs", 2)
     if app.bot_data.get("running_jobs", 0) >= max_jobs:
-        await q.edit_message_text(
-            "⏳ Server busy ({} jobs running). Try again later.".format(max_jobs),
-            reply_markup=kb_back_main(),
-        )
+        text = "⏳ Server busy ({} jobs running). Try again later.".format(
+            max_jobs)
+        if hasattr(q, "edit_message_text"):
+            await q.edit_message_text(text, reply_markup=kb_back_main())
+        else:
+            await q.reply_text(text, reply_markup=kb_back_main())
         return
 
     app.bot_data["running_jobs"] = app.bot_data.get("running_jobs", 0) + 1
@@ -843,17 +1088,19 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
         else "every {} min".format(time_split_minutes)
     api_mode = "Local Bot API Server" if local_bot_api_url \
         else "hosted Bot API"
-    await q.edit_message_text(
+    text = (
         "✅ *Queued*\n{} · {} programme(s)\nSplit: {}\n"
         "Upload cap: {:.0f} MiB/file ({})\nStarting…"
-        .format(ch_name, len(items), split_label,
-                max_bytes / (1024 * 1024), api_mode),
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    ).format(ch_name, len(items), split_label,
+             max_bytes / (1024 * 1024), api_mode)
+    if hasattr(q, "edit_message_text"):
+        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await q.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     reporter = ProgressReporter(
         ctx.bot,
-        q.message.chat_id,
+        origin_message.chat_id,
         header="🚀 {} — {} programme(s)".format(ch_name, len(items)),
     )
     reporter_task = asyncio.create_task(reporter.run())
@@ -878,16 +1125,16 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
             0, app.bot_data.get("running_jobs", 1) - 1)
 
     if err:
-        await q.message.chat.send_message("❌ Job failed: {}".format(err))
+        await chat.send_message("❌ Job failed: {}".format(err))
         _wipe_tree(out_dir)
         return
 
     if not produced:
-        await q.message.chat.send_message("⚠️ No files produced.")
+        await chat.send_message("⚠️ No files produced.")
         _wipe_tree(out_dir)
         return
 
-    await q.message.chat.send_message(
+    await chat.send_message(
         "📤 Uploading {} file(s)…".format(len(produced)))
 
     uploaded_ok = 0
@@ -901,7 +1148,7 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
             size_mb = size_bytes / 1024 / 1024
             suffix = p.suffix.lower()
             if size_bytes > max_bytes:
-                await q.message.chat.send_message(
+                await chat.send_message(
                     "⏭ Skipped {} ({:.0f} MB, over cap)".format(p.name, size_mb))
                 continue
 
@@ -929,14 +1176,14 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                             log.warning(
                                 "could not prepare video preview for %s: %s",
                                 p.name, preview_error)
-                            await q.message.chat.send_message(
+                            await chat.send_message(
                                 "⚠️ Could not prepare the video preview for {}: "
                                 "{}. Sending without a custom preview.".format(
                                     p.name, preview_error))
 
                         if thumbnail_ready:
                             with open(thumbnail_path, "rb") as thumbnail:
-                                await q.message.chat.send_video(
+                                await chat.send_video(
                                     video=f,
                                     filename=p.name,
                                     caption=p.name,
@@ -944,7 +1191,7 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                                     **video_options,
                                 )
                         else:
-                            await q.message.chat.send_video(
+                            await chat.send_video(
                                 video=f,
                                 filename=p.name,
                                 caption=p.name,
@@ -959,13 +1206,13 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                                     "could not remove video thumbnail %s: %s",
                                     thumbnail_path, cleanup_error)
                 elif suffix == ".m4a" and send_native:
-                    await q.message.chat.send_audio(
+                    await chat.send_audio(
                         audio=f,
                         filename=p.name,
                         caption=p.name,
                     )
                 else:
-                    await q.message.chat.send_document(
+                    await chat.send_document(
                         document=f,
                         filename=p.name,
                         caption="{} ({:.1f} MB)".format(p.name, size_mb),
@@ -992,14 +1239,14 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
                             except OSError:
                                 log.warning("could not remove re-split source %s", p)
                             pending_uploads[:0] = smaller_parts
-                            await q.message.chat.send_message(
+                            await chat.send_message(
                                 "⚠️ Telegram rejected {} as too large; "
                                 "retrying as {} smaller file(s).".format(
                                     p.name, len(smaller_parts)))
                             continue
             uploaded_fail += 1
             log.exception("upload failed for %s", p)
-            await q.message.chat.send_message(
+            await chat.send_message(
                 "❌ upload failed for {}: {}".format(p.name, e))
 
     if bot_cfg.get("delete_everything_after_upload", True):
@@ -1009,7 +1256,7 @@ async def start_job(q, ctx, ch, media, d, items, time_split_minutes=0):
     if uploaded_fail:
         summary += ", {} failed".format(uploaded_fail)
     summary += "\n🗑 Files deleted from disk."
-    await q.message.chat.send_message(summary, reply_markup=kb_main())
+    await chat.send_message(summary, reply_markup=kb_main())
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1072,6 +1319,103 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_programmes_msg(update, ctx, ch_id, d, page=0)
         return
 
+    if awaiting == "range_start":
+        try:
+            start_time = datetime.strptime(text, "%H:%M").time()
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid time. Send the start time as 24-hour `HH:MM` "
+                "(for example, `13:30`), in IST.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Cancel", callback_data="range_cancel")
+                ]]),
+            )
+            return
+        cached = ctx.user_data.get("programmes") or {}
+        if not cached.get("list"):
+            ctx.user_data["awaiting"] = None
+            await update.message.reply_text(
+                "EPG session expired. Pick the channel and date again.")
+            return
+        date_value = datetime.strptime(cached["date"], "%Y-%m-%d").date()
+        start_dt = datetime.combine(date_value, start_time, tzinfo=IST)
+        ctx.user_data["range_start_epoch"] = int(start_dt.timestamp())
+        ctx.user_data["awaiting"] = "range_end"
+        await update.message.reply_text(
+            "Start: *{:%Y-%m-%d %H:%M} IST*\n"
+            "Now send the *end time* as 24-hour `HH:MM`.".format(start_dt),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Cancel", callback_data="range_cancel")
+            ]]),
+        )
+        return
+
+    if awaiting == "range_end":
+        try:
+            end_time = datetime.strptime(text, "%H:%M").time()
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid time. Send the end time as 24-hour `HH:MM` "
+                "(for example, `15:45`), in IST.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Cancel", callback_data="range_cancel")
+                ]]),
+            )
+            return
+        cached = ctx.user_data.get("programmes") or {}
+        if not cached.get("list"):
+            ctx.user_data["awaiting"] = None
+            await update.message.reply_text(
+                "EPG session expired. Pick the channel and date again.")
+            return
+        date_value = datetime.strptime(cached["date"], "%Y-%m-%d").date()
+        end_dt = datetime.combine(date_value, end_time, tzinfo=IST)
+        end_epoch = int(end_dt.timestamp())
+        start_epoch = int(ctx.user_data.get("range_start_epoch", 0))
+        if end_epoch <= start_epoch:
+            await update.message.reply_text(
+                "The end time must be later than the start time on the "
+                "selected date. Send the end time again as `HH:MM`.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Cancel", callback_data="range_cancel")
+                ]]),
+            )
+            return
+
+        items = []
+        for prog in cached["list"]:
+            prog_start = int(prog["start_timestamp"])
+            prog_end = int(prog["stop_timestamp"])
+            clip_start = max(start_epoch, prog_start)
+            clip_end = min(end_epoch, prog_end)
+            if clip_start < clip_end:
+                items.append((prog, clip_start, clip_end))
+        ctx.user_data["awaiting"] = None
+        ctx.user_data.pop("range_start_epoch", None)
+        if not items:
+            await update.message.reply_text(
+                "No EPG programmes overlap {}–{} IST on {}. "
+                "Choose another time range.".format(
+                    datetime.fromtimestamp(start_epoch, IST).strftime("%H:%M"),
+                    end_dt.strftime("%H:%M"), cached["date"]),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🕒 Enter another time range",
+                        callback_data="timerange")],
+                    [InlineKeyboardButton(
+                        "⬅️ Back to EPG",
+                        callback_data="progpg|{}|{}|0".format(
+                            cached["ch_id"], cached["date"]))],
+                ]),
+            )
+            return
+        await prompt_batch_media(update.message, ctx, items)
+        return
+
     await update.message.reply_text("Okay.", reply_markup=kb_main())
 
 
@@ -1092,6 +1436,13 @@ async def show_programmes_msg(update, ctx, ch_id, d, page=0):
         await update.message.reply_text("EPG failed: {}".format(e))
         return
 
+    date_str = d.isoformat()
+    old_programmes = ctx.user_data.get("programmes") or {}
+    if old_programmes.get("ch_id") != ch_id \
+            or old_programmes.get("date") != date_str:
+        ctx.user_data["programme_selection_active"] = False
+        ctx.user_data["programme_selection"] = set()
+        ctx.user_data.pop("pending_items", None)
     progs.sort(key=lambda p: int(p["start_timestamp"]))
     ctx.user_data["programmes"] = {
         "ch_id": ch_id, "date": date_str, "list": progs, "channel": ch}
@@ -1103,9 +1454,15 @@ async def show_programmes_msg(update, ctx, ch_id, d, page=0):
     await update.message.reply_text(
         "🎬 *{}*\n📅 {}\n{} programmes — tap one:".format(
             ch.get("name"), date_str, len(progs)),
-        reply_markup=kb_programmes(ch_id, date_str, progs, page=page),
+        reply_markup=kb_programmes(
+            ch_id, date_str, progs, page=page,
+            selection_mode=ctx.user_data.get(
+                "programme_selection_active", False),
+            selected_indices=ctx.user_data.get("programme_selection", set()),
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
+    ctx.user_data["programme_selection_page"] = page
 
 
 async def post_init(app):

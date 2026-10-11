@@ -42,3 +42,10 @@ requested interval, the job reports a failure instead of uploading the
 unsplit file. Split MP4 and M4A files are numbered `_part_001`, `_part_002`,
 and so on. Audio-only downloads require the archive to contain an audio
 stream; video-only streams are reported as unavailable for audio conversion.
+
+From a channel's EPG, choose **Select multiple programmes** to toggle
+programmes across pages, then confirm the selection. Alternatively choose
+**Enter start/end time (IST)** and send a 24-hour `HH:MM` start time followed
+by an end time on the same selected date. A manual time range downloads only
+the overlapping EPG portions. Both options then ask for video/audio format
+and the usual time-split setting.
